@@ -11,9 +11,9 @@ namespace WifiDirectService.Sockets
 {
     public class Socket : IDisposable
     {
-        static Service wifiService = null!;
-
-        const int PORT = 8881;
+        private static Service wifiService = null!;
+        private const int PORT = 8881;
+        private const string DIR = @"C:/archivosRecibidos/";
 
         private static void SendJsonMessage(object data)
         {
@@ -29,8 +29,6 @@ namespace WifiDirectService.Sockets
                 TcpListener listener = new TcpListener(IPAddress.Parse(ipAddress), PORT);
                 SendJsonMessage(new { event_type = "SERVER", message = $"Servidor escuchando en el puerto: {PORT}" });
                 listener.Start();
-
-                String dir = @"C:/archivosRecibidos/";
 
                 while (true)
                 {
@@ -55,19 +53,19 @@ namespace WifiDirectService.Sockets
                                 SendJsonMessage(new { event_type = "SERVER", message = $"Recibiendo '{fileName}'..." });
 
                                 // crear carpeta si no existe
-                                Directory.CreateDirectory(dir);
+                                Directory.CreateDirectory(DIR);
                                  
                                 // obtener nombre del archivo
                                 string name = Path.GetFileName(fileName);
                                 
-                                string pathDir = Path.Join(dir, name);
+                                string fullPath = Path.Join(DIR, name);
 
                                 byte[] buffer = new byte[8192];
                                 long totalRead = 0;
 
                                 using (FileStream fs = 
                                         new FileStream(
-                                            pathDir, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true 
+                                            fullPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true 
                                         ))
                                 {
                                     while (totalRead < fileSize)
