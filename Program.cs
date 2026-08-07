@@ -1,97 +1,97 @@
 ﻿using System;
 using System.Collections.Concurrent;
 using System.Linq;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using Windows.Devices.WiFiDirect;
+using Windows.Devices.Enumeration;
 using WifiDirectService.Services;
-using WifiDirectService.Protocol;
 
 class Program
 {
     static Service wifiService = null!;
-    private static CancellationTokenSource? _discoveryCts;
 
     static async Task Main(string[] args)
     {
-        wifiService = new Service();
-        while (true)
+        try
         {
-            string? input = await Console.In.ReadLineAsync();
-            if (string.IsNullOrEmpty(input)) continue;
-
-            try
+            wifiService = new Service();
+            while (true)
             {
-                // Parseamos el comando enviado por Electron
-                var command = JsonSerializer.Deserialize<Command>(input);
-                if (command == null) continue;
+                Console.Clear();
+                Console.WriteLine("WI-FI DIRECT");
+                Console.WriteLine("---------------------------------------");
+                Console.WriteLine("1. Iniciar descubrimiento y anunciar");
+                Console.WriteLine("2. Conectar dispositivo");
+                Console.WriteLine("3. Detener servicio");
+                Console.WriteLine("---------------------------------------");
+                Console.Write("\nSelecciona una opción: ");
 
-                switch (command.Action)
+                string? option = Console.ReadLine();
+
+                switch (option)
                 {
-                    case "START_DISCOVERY":
-                        StartDiscovery();
+                    case "1":
+                        wifiService.Init();
+
+                        var cts = new CancellationTokenSource();
+
+                        Task renderTask = Task.Run(async () =>
+                        {
+                            while (!cts.Token.IsCancellationRequested)
+                            {
+                                Console.Clear();
+                                Console.WriteLine("========================================");
+                                Console.WriteLine("       ¡DISPOSITIVOS ENCONTRADOS!       ");
+                                Console.WriteLine(" (Presione cualquier tecla para salir)  ");
+                                Console.WriteLine("========================================");
+
+                                // leemos desde DiscoveredDevices
+                                var snapshot = wifiService.discoveredDevices.ToArray();
+
+                                    int index = 1;
+                                    foreach (var kvp in snapshot)
+                                    {
+                                        var dev = kvp.Value;
+                                        string name = string.IsNullOrEmpty(dev.Name) ? "Dispositivo anónimo / Sin nombre" : dev.Name;
+
+                                        Console.WriteLine($"{index}. Nombre: {name}");
+                                        Console.WriteLine($"   ID    : {dev.Id}");
+                                        Console.WriteLine("----------------------------------------");
+                                        index++;
+                                    }                                
+
+                                await Task.Delay(3000);
+                            }
+                        });
+
+                        Console.ReadKey(true);
+
+                        cts.Cancel();
+                        await renderTask;
                         break;
 
-                    case "STOP_DISCOVERY":
+                    case "2":
+                        await wifiService.ConnectToDevice();
+                        Console.ReadKey();
+                        break;
+
+                    case "3":
                         wifiService.Stop();
-                        StopDiscovery();
+                        Console.ReadKey();
                         break;
 
-                    case "CONNECT":
-                        string? idRecibido = command.Values;
-                        await wifiService.ConnectToDevice(idRecibido);
+                    default:
+                        Console.WriteLine("\nOpción inválida. Presiona una tecla para continuar...");
+                        Console.ReadKey();
                         break;
-
-                    case "GET_FILE":
-                        string? nameFile = command.Values;
-                        wifiService.GetFile(nameFile);
-                        break;
-
-                    case "EXIT":
-                        return;
                 }
             }
-            catch (Exception ex)
-            {
-                SendJson(new { error = ex.Message });
-            }
         }
-    }
-
-    static void StartDiscovery()
-    {
-        wifiService.Init();
-        _discoveryCts = new CancellationTokenSource();
-
-        Task.Run(async () =>
+        catch (Exception ex)
         {
-            while (!_discoveryCts.Token.IsCancellationRequested)
-            {
-                var snapshot = wifiService.discoveredDevices.ToArray();
-             
-                var deviceList = snapshot.Select(kvp => new {
-                    id = kvp.Value.Id,
-                    name = string.IsNullOrEmpty(kvp.Value.Name) ? "Dispositivo anónimo" : kvp.Value.Name
-                }).ToList();
-
-                // Enviamos la lista como JSON a Electron
-                SendJson(new { event_type = "DEVICES_UPDATED", devices = deviceList });
-
-                await Task.Delay(3000);
-            }
-        });
-    }
-
-    static void StopDiscovery()
-    {
-        _discoveryCts?.Cancel();
-        SendJson(new { status = "DISCOVERY_STOPPED" });
-    }
-
-    static void SendJson(object data)
-    {
-        string json = JsonSerializer.Serialize(data);
-        Console.WriteLine(json);
+            Console.WriteLine($"\nOcurrió un error general: {ex.Message}");
+            Console.ReadKey();
+            return;
+        }
     }
 }

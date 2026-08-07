@@ -1,39 +1,34 @@
 using System;
+using System.Buffers.Binary;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading.Tasks;
-using WifiDirectService.Services;
 
 namespace WifiDirectService.Sockets
 {
     public class Socket : IDisposable
     {
-        private static Service wifiService = null!;
+        private TcpListener? listener;
         private const int PORT = 8881;
         private const string DIR = @"C:/archivosRecibidos/";
-
-        private static void SendJsonMessage(object data)
-        {
-            Console.WriteLine(JsonSerializer.Serialize(data));
-        }
+        private bool isDisposed;
 
         // Iniciar servidor
-        public async Task StartServerSocket(string ipAddress)
+        public async Task StartServerSocket(string ipAddress, CancellationToken cancellationToken = default)
         {
             try
             {
-                wifiService = new Service();
-                TcpListener listener = new TcpListener(IPAddress.Parse(ipAddress), PORT);
-                SendJsonMessage(new { event_type = "SERVER", message = $"Servidor escuchando en el puerto: {PORT}" });
+                listener = new TcpListener(IPAddress.Parse(ipAddress), PORT);
+                Console.WriteLine($"Servidor escuchando en el puerto: {PORT}");
                 listener.Start();
 
                 while (true)
                 {
                     TcpClient client = await listener.AcceptTcpClientAsync();
-                    SendJsonMessage(new { event_type = "SERVER", message = "Cliente conectado!" });
+                    Console.WriteLine("Cliente conectado!");
 
                     _ = Task.Run(async () =>
                     {
@@ -41,72 +36,72 @@ namespace WifiDirectService.Sockets
                         {
                             using (client)
                             using (NetworkStream stream = client.GetStream())
-                            using (BinaryReader reader = new BinaryReader(stream))
                             {
-                                ushort nameLength = ReadUInt16BigEndian(reader);
+                                // leer longitud del nombre
+                                byte[] nameLengthBuffer = new byte[2];
+                                await stream.ReadExactlyAsync(nameLengthBuffer, 0, 2, cancellationToken);
+                                ushort nameLength = BinaryPrimitives.ReadUInt16BigEndian(nameLengthBuffer);
 
-                                byte[] nameBytes = reader.ReadBytes(nameLength);
+                                // leer nombre del archivo
+                                byte[] nameBytes = new byte[nameLength];
+                                await stream.ReadExactlyAsync(nameBytes, 0, nameLength, cancellationToken);
                                 string fileName = Encoding.UTF8.GetString(nameBytes);
 
-                                long fileSize = ReadInt64BigEndian(reader);
+                                // leer tamaño del archivo
+                                byte[] fileSizeBuffer = new byte[8];
+                                await stream.ReadExactlyAsync(fileSizeBuffer, 0, 8, cancellationToken);
+                                long fileSize = BinaryPrimitives.ReadInt64BigEndian(fileSizeBuffer);
 
-                                SendJsonMessage(new { event_type = "SERVER", message = $"Recibiendo '{fileName}'..." });
+                                Console.WriteLine($"Recibiendo '{fileName}' ({fileSize} bytes)...");
 
-                                // crear carpeta si no existe
+                                // crear directorio si no existe
                                 Directory.CreateDirectory(DIR);
-                                 
-                                // obtener nombre del archivo
-                                string name = Path.GetFileName(fileName);
-                                
-                                string fullPath = Path.Join(DIR, name);
+
+                                // limpiar nombre del archivo
+                                string cleanName = Path.GetFileName(fileName);
+                                string fullPath = Path.Join(DIR, cleanName);
 
                                 byte[] buffer = new byte[8192];
                                 long totalRead = 0;
 
-                                using (FileStream fs = 
-                                        new FileStream(
-                                            fullPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true 
-                                        ))
+                                using (FileStream fs = new FileStream(
+                                           fullPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true))
                                 {
                                     while (totalRead < fileSize)
                                     {
                                         int toRead = (int)Math.Min(buffer.Length, fileSize - totalRead);
                                         int bytesRead = await stream.ReadAsync(buffer, 0, toRead);
-                                        if (bytesRead <= 0) break;
+
+                                        if (bytesRead <= 0)
+                                            throw new EndOfStreamException("La conexión se cerró inesperadamente antes de completar el archivo.");
 
                                         await fs.WriteAsync(buffer, 0, bytesRead);
                                         totalRead += bytesRead;
                                     }
 
-
-                                    SendJsonMessage(new
-                                    {
-                                        event_type = "SERVER",
-                                        message = "Archivo recibido"
-                                    });
+                                    Console.WriteLine($"Archivo {cleanName} recibido con éxito.");
                                 }
                             }
                         }
                         catch (Exception ex)
                         {
-                            SendJsonMessage(new { event_type = "SERVER", message = $"Error al procesar los datos: {ex.Message}" });
+                            Console.WriteLine($"Error al procesar cliente: {ex.Message}");
                         }
                     });
                 }
             }
             catch (Exception ex)
             {
-                SendJsonMessage(new { event_type = "ERROR", message = ex.Message });
+                Console.WriteLine($"Ocurrió un error: {ex.Message}");
             }
         }
 
         // Iniciar cliente y transferencia de archivo
-        public async Task StartClientSocket(string ipAddress, string? filePath)
+        public async Task StartClientSocket(string ipAddress, string? filePath, CancellationToken cancellationToken = default)
         {
-            SendJsonMessage(new { event_type = "file", message = filePath });
             try
             {
-                if (!File.Exists(filePath))
+                if (string.IsNullOrEmpty(filePath) || !File.Exists(filePath))
                 {
                     throw new FileNotFoundException("El archivo que intentas enviar no existe.", filePath);
                 }
@@ -122,64 +117,70 @@ namespace WifiDirectService.Sockets
                 ushort nameLength = (ushort)nameBytes.Length;
                 long fileSize = new FileInfo(filePath).Length;
 
-                SendJsonMessage(new { event_type = "CLIENT", message = $"Conectado al servidor. Enviando '{fileName}'..." });
+                Console.WriteLine($"Conectado al servidor. Enviando {fileName}...");
 
-                WriteUInt16BigEndian(writer, nameLength);
-                writer.Write(nameBytes);
-                WriteInt64BigEndian(writer, fileSize);
+                // escribir Encabezado
+                byte[] headerBuffer = new byte[2 + nameBytes.Length + 8];
+                
+                // longitud nombre
+                BinaryPrimitives.WriteUInt16BigEndian(headerBuffer.AsSpan(0, 2), (ushort)nameBytes.Length);
+                // nombre
+                nameBytes.CopyTo(headerBuffer.AsSpan(2, nameBytes.Length));
+                // tamaño del archivo
+                BinaryPrimitives.WriteInt64BigEndian(headerBuffer.AsSpan(2 + nameBytes.Length, 8), fileSize);
 
-                using FileStream fileStream = File.OpenRead(filePath);
+                await stream.WriteAsync(headerBuffer, cancellationToken);
+                await stream.FlushAsync(cancellationToken);
+
+                // escribir Payload del archivo
+                await using FileStream fileStream = File.OpenRead(filePath);
                 byte[] buffer = new byte[8192];
                 int bytesRead;
 
-                while ((bytesRead = await fileStream.ReadAsync(buffer, 0, buffer.Length)) > 0)
+                while ((bytesRead = await fileStream.ReadAsync(buffer, cancellationToken)) > 0)
                 {
-                    await stream.WriteAsync(buffer, 0, bytesRead);
+                    await stream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
                 }
 
-                SendJsonMessage(new
-                {
-                    event_type = "CLIENT",
-                    message = "Archivo enviado",
-                    file_name = fileName,
-                    size_bytes = fileSize
-                });
+                await stream.FlushAsync(cancellationToken);
+
+                Console.WriteLine("Archivo enviado con éxito");
             }
             catch (Exception ex)
             {
-                SendJsonMessage(new { event_type = "ERROR", message = ex.Message });
+                Console.WriteLine($"Error en el cliente: {ex.Message}");
             }
         }
 
-        // métodos auxiliares
-        static ushort ReadUInt16BigEndian(BinaryReader reader)
+        public void StopServer()
         {
-            byte[] data = reader.ReadBytes(2);
-            if (BitConverter.IsLittleEndian) Array.Reverse(data);
-            return BitConverter.ToUInt16(data, 0);
+            if (listener != null)
+            {
+                try
+                {
+                    listener.Stop();
+                }
+                catch {}
+
+                listener = null;
+            }
         }
 
-        static long ReadInt64BigEndian(BinaryReader reader)
-        {
-            byte[] data = reader.ReadBytes(8);
-            if (BitConverter.IsLittleEndian) Array.Reverse(data);
-            return BitConverter.ToInt64(data, 0);
+        public void Dispose() {
+            Dispose(true);
+            GC.SuppressFinalize(this);
         }
 
-        static void WriteUInt16BigEndian(BinaryWriter writer, ushort value)
+        protected virtual void Dispose(bool disposing)
         {
-            byte[] data = BitConverter.GetBytes(value);
-            if (BitConverter.IsLittleEndian) Array.Reverse(data);
-            writer.Write(data);
-        }
+            if (isDisposed) return;
 
-        static void WriteInt64BigEndian(BinaryWriter writer, long value)
-        {
-            byte[] data = BitConverter.GetBytes(value);
-            if (BitConverter.IsLittleEndian) Array.Reverse(data);
-            writer.Write(data);
-        }
+            if (disposing)
+            {
+                StopServer();
+            }
 
-        public void Dispose() { }
+            isDisposed = true;
+        }
     }
 }
