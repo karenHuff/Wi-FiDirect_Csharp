@@ -3,18 +3,20 @@ using System.Buffers.Binary;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
-using System.Text;
-using System.Text.Json;
 using System.Threading.Tasks;
+using System.Text;
+
+using WifiDirectService.Protocol;
 
 namespace WifiDirectService.Sockets
 {
-    public class Socket : IDisposable
+    public class Sockets : IDisposable
     {
         private TcpListener? listener;
         private const int PORT = 8881;
         private const string DIR = @"C:/archivosRecibidos/";
         private bool isDisposed;
+        private static SendJsonMessage sjm = new SendJsonMessage();
 
         // Iniciar servidor
         public async Task StartServerSocket(string ipAddress, CancellationToken cancellationToken = default)
@@ -22,13 +24,13 @@ namespace WifiDirectService.Sockets
             try
             {
                 listener = new TcpListener(IPAddress.Parse(ipAddress), PORT);
-                Console.WriteLine($"Servidor escuchando en el puerto: {PORT}");
+                sjm.SendMessage(new { event_type = "SERVER", message = $"Servidor escuchando en el puerto: {PORT}" });
                 listener.Start();
 
                 while (true)
                 {
                     TcpClient client = await listener.AcceptTcpClientAsync();
-                    Console.WriteLine("Cliente conectado!");
+                    sjm.SendMessage(new { event_type = "SERVER", message = "Cliente conectado!" });
 
                     _ = Task.Run(async () =>
                     {
@@ -52,20 +54,19 @@ namespace WifiDirectService.Sockets
                                 await stream.ReadExactlyAsync(fileSizeBuffer, 0, 8, cancellationToken);
                                 long fileSize = BinaryPrimitives.ReadInt64BigEndian(fileSizeBuffer);
 
-                                Console.WriteLine($"Recibiendo '{fileName}' ({fileSize} bytes)...");
+                                sjm.SendMessage(new { event_type = "SERVER", message = $"Recibiendo {fileName} ({fileSize} bytes)..." });
 
                                 // crear directorio si no existe
                                 Directory.CreateDirectory(DIR);
 
-                                // limpiar nombre del archivo
+                                // obtener nombre del archivo
                                 string cleanName = Path.GetFileName(fileName);
                                 string fullPath = Path.Join(DIR, cleanName);
 
                                 byte[] buffer = new byte[8192];
                                 long totalRead = 0;
 
-                                using (FileStream fs = new FileStream(
-                                           fullPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true))
+                                using (FileStream fs = new FileStream(fullPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, useAsync: true))
                                 {
                                     while (totalRead < fileSize)
                                     {
@@ -73,26 +74,34 @@ namespace WifiDirectService.Sockets
                                         int bytesRead = await stream.ReadAsync(buffer, 0, toRead);
 
                                         if (bytesRead <= 0)
-                                            throw new EndOfStreamException("La conexión se cerró inesperadamente antes de completar el archivo.");
+                                            throw new EndOfStreamException("La conexion se cerro inesperadamente antes de completar el archivo.");
 
                                         await fs.WriteAsync(buffer, 0, bytesRead);
                                         totalRead += bytesRead;
                                     }
 
-                                    Console.WriteLine($"Archivo {cleanName} recibido con éxito.");
+                                    sjm.SendMessage(new
+                                    {
+                                        event_type = "SERVER",
+                                        message = $"Archivo '{cleanName}' recibido con exito.",
+                                        file_name = cleanName,
+                                        size_bytes = totalRead
+                                    });
                                 }
                             }
+
+                            client.Close();
                         }
                         catch (Exception ex)
                         {
-                            Console.WriteLine($"Error al procesar cliente: {ex.Message}");
+                            sjm.SendMessage(new { event_type = "SERVER", message = $"Error al procesar el archivo: {ex.Message}" });
                         }
                     });
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ocurrió un error: {ex.Message}");
+                sjm.SendMessage(new { event_type = "ERROR", message = ex.Message });
             }
         }
 
@@ -117,11 +126,11 @@ namespace WifiDirectService.Sockets
                 ushort nameLength = (ushort)nameBytes.Length;
                 long fileSize = new FileInfo(filePath).Length;
 
-                Console.WriteLine($"Conectado al servidor. Enviando {fileName}...");
+                sjm.SendMessage(new { event_type = "CLIENT", message = $"Conectado al servidor. Enviando {fileName}..." });
 
                 // escribir Encabezado
                 byte[] headerBuffer = new byte[2 + nameBytes.Length + 8];
-                
+
                 // longitud nombre
                 BinaryPrimitives.WriteUInt16BigEndian(headerBuffer.AsSpan(0, 2), (ushort)nameBytes.Length);
                 // nombre
@@ -144,11 +153,11 @@ namespace WifiDirectService.Sockets
 
                 await stream.FlushAsync(cancellationToken);
 
-                Console.WriteLine("Archivo enviado con éxito");
+                sjm.SendMessage(new { event_type = "CLIENT", message = "Archivo enviado con éxito" });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error en el cliente: {ex.Message}");
+                sjm.SendMessage(new { event_type = "CLIENT", message = $"Error en el cliente: {ex.Message}" });
             }
         }
 
@@ -160,13 +169,14 @@ namespace WifiDirectService.Sockets
                 {
                     listener.Stop();
                 }
-                catch {}
+                catch { }
 
                 listener = null;
             }
         }
 
-        public void Dispose() {
+        public void Dispose()
+        {
             Dispose(true);
             GC.SuppressFinalize(this);
         }

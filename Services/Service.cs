@@ -3,11 +3,13 @@ using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Text;
+using System.Text.Json; 
 using System.Threading;
 using System.Threading.Tasks;
 using Windows.Devices.Enumeration;
 using Windows.Devices.WiFiDirect;
-using WifiDirectService.Sockets;
+
+using WifiDirectService.Protocol;
 
 namespace WifiDirectService.Services
 {
@@ -21,11 +23,9 @@ namespace WifiDirectService.Services
         private WiFiDirectConnectionListener? connectionListener;
         private bool isDisposed;
 
-        static Socket socket = new Socket();
-
+        private static SendJsonMessage sjm = new SendJsonMessage();
         public IReadOnlyDictionary<string, DeviceInformation> DiscoveredDevices => discoveredDevices;
 
-        // iniciar publicador
         public void Init()
         {
             if (watcher != null) return;
@@ -34,7 +34,7 @@ namespace WifiDirectService.Services
             {
                 discoveredDevices.Clear();
 
-                // iniciar publicador
+                // Iniciar publicador
                 publisher = new WiFiDirectAdvertisementPublisher();
                 publisher.Advertisement.ListenStateDiscoverability = WiFiDirectAdvertisementListenStateDiscoverability.Normal;
                 publisher.Advertisement.IsAutonomousGroupOwnerEnabled = false;
@@ -44,13 +44,14 @@ namespace WifiDirectService.Services
 
                 publisher.Start();
 
-                Console.WriteLine("Iniciando publicador");
-                
-                // escuchar solicitudes de conexión entrantes
-                connectionListener = new WiFiDirectConnectionListener();                
+                sjm.SendMessage(new { event_type = "PUBLISHER_STARTED", message = "Iniciando publicador" });
+
+                connectionListener = new WiFiDirectConnectionListener();
+
+                // escuchar solicitudes entrantes
                 connectionListener.ConnectionRequested += OnConnectionRequested;
 
-                // configurar watcher
+                // Configurar watcher
                 string selector = WiFiDirectDevice.GetDeviceSelector(
                     WiFiDirectDeviceSelectorType.AssociationEndpoint);
 
@@ -67,21 +68,18 @@ namespace WifiDirectService.Services
 
                 watcher.Start();
 
-                Console.WriteLine("Discovery started");
+                sjm.SendMessage(new { event_type = "DISCOVERY_STARTED", message = "Discovery started" });
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"\nOcurrió un error: {ex.Message}");
+                sjm.SendMessage(new { event_type = "ERROR", message = $"Ocurrió un error: {ex.Message}" });
             }
         }
 
         private void OnDeviceAdded(DeviceWatcher sender, DeviceInformation device)
         {
-            discoveredDevices.AddOrUpdate(
-                device.Id,
-                device,
-                (id, oldDevice) => device
-            );
+            discoveredDevices.AddOrUpdate(device.Id, device, (id, oldDevice) => device);
+            NotifyDevicesChanged();
         }
 
         private void OnDeviceUpdated(DeviceWatcher sender, DeviceInformationUpdate update)
@@ -92,31 +90,40 @@ namespace WifiDirectService.Services
                 {
                     var updatedDevice = await DeviceInformation.CreateFromIdAsync(update.Id);
                     discoveredDevices.AddOrUpdate(updatedDevice.Id, updatedDevice, (id, old) => updatedDevice);
+                    NotifyDevicesChanged();
                 }
                 catch { }
             });
         }
 
-
         private void OnDeviceRemoved(DeviceWatcher sender, DeviceInformationUpdate update)
         {
-            Console.WriteLine($"[REMOVED] {update.Id}");
             discoveredDevices.TryRemove(update.Id, out _);
+            NotifyDevicesChanged();
         }
-
 
         private void OnWatcherStopped(DeviceWatcher sender, object args)
         {
-            Console.WriteLine("discovery stopped ");
+            sjm.SendMessage(new { event_type = "DISCOVERY_STOPPED", message = "discovery stopped" });
         }
 
-        // manejo de solicitudes entrantes
+        // Envía la lista a Electron cada vez que el Watcher detecta un cambio
+        private void NotifyDevicesChanged()
+        {
+            var deviceList = discoveredDevices.Values.Select(dev => new {
+                id = dev.Id,
+                name = string.IsNullOrEmpty(dev.Name) ? "Dispositivo anónimo / Sin nombre" : dev.Name
+            }).ToList();
+
+            sjm.SendMessage(new { event_type = "DEVICES_UPDATED", devices = deviceList });            
+        }
+
+        // Manejo de solicitudes entrantes
         private async void OnConnectionRequested(WiFiDirectConnectionListener sender, WiFiDirectConnectionRequestedEventArgs args)
         {
-            Console.WriteLine("\n¡Solicitud de conexión Wi-Fi Direct recibida!");
-
             try
             {
+                sjm.SendMessage(new { event_type = "REQUEST", message = "¡Solicitud de conexión Wi-Fi Direct recibida!" });
                 WiFiDirectConnectionRequest connectionRequest = args.GetConnectionRequest();
 
                 WiFiDirectConnectionParameters parameters = new WiFiDirectConnectionParameters();
@@ -126,10 +133,11 @@ namespace WifiDirectService.Services
 
                 string deviceId = connectionRequest.DeviceInformation.Id;
                 WiFiDirectDevice wfdDevice = await WiFiDirectDevice.FromIdAsync(deviceId, parameters);
-                
+
+
                 if (wfdDevice == null)
                 {
-                    Console.WriteLine("Error: No se pudo obtener la instancia de WiFiDirectDevice (Devolvió null).");
+                    sjm.SendMessage(new { event_type = "ERROR", message = "No se pudo obtener la instancia de WiFiDirectDevice" });
                     return;
                 }
 
@@ -138,86 +146,84 @@ namespace WifiDirectService.Services
                 var endpointPairs = wfdDevice.GetConnectionEndpointPairs();
                 if (endpointPairs.Count > 0)
                 {
-                    // obtener IP
                     string remoteHost = endpointPairs[0].RemoteHostName.RawName;
-
-                    Console.WriteLine("\n====== CONEXIÓN ESTABLECIDA CON ÉXITO ======");
-                    Console.WriteLine($"IP Local: {endpointPairs[0].LocalHostName.RawName}");
-                    Console.WriteLine($"IP Remota: {endpointPairs[0].RemoteHostName.RawName}");
-                    Console.WriteLine("============================================\n");
-
-                    await Task.Delay(1500);
-
-                    // Iniciar socket
-                    _ = Task.Run(async () =>
+                    sjm.SendMessage(new
                     {
-                        try 
-                        {
-                            await socket.StartClientSocket(remoteHost, "");
-                        } 
-                        catch (Exception socketEx)
-                        {
-                            Console.WriteLine($"\nError en el cliente: {socketEx.Message}");
-                        }
+                        event_type = "CONNECTION_SUCCESS",
+                        message = "Dispositivo conectado",
+                        status = "cliente",
+                        ip_servidor = remoteHost
                     });
                 }
                 else
                 {
-                    Console.WriteLine("No se pudieron negociar los Endpoints de red.");
+                    sjm.SendMessage(new { type_event = "ERROR", message = "No se pudieron negociar los Endpoint de red" });
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Error al procesar conexión entrante: {ex.Message}");
+                sjm.SendMessage(new { event_type = "CONNECTION_FAILED", message = $"Error al procesar la conexión entrante: {ex.Message}" });
+                sjm.SendMessage(new { event_type = "CONNECION_FAILED", message = $"HResult: {ex.HResult}" });
             }
         }
 
-        // Conectar dispositivos
-        public async Task ConnectToDevice()
+        // conectar dispositivos
+        public async Task ConnectToDevice(string? deviceId)
         {
-            if (watcher != null && watcher.Status == DeviceWatcherStatus.Started)
+            if (string.IsNullOrEmpty(deviceId))
             {
-                watcher.Stop();
-            }
-
-            if (discoveredDevices.IsEmpty)
-            {
-                Console.WriteLine("\nNo hay dispositivos a los que conectarse.");
+                sjm.SendMessage(new { event_type = "CONNECTION_FAILED", message = "El ID del dispositivo no es válido." });
                 return;
             }
-
-            var snapshot = discoveredDevices.ToArray();
-
-            Console.WriteLine("\n=== SELECCIONAR DISPOSITIVO PARA CONECTAR ===");
-
-            for (int i = 0; i < snapshot.Length; i++)
-            {
-                string name = string.IsNullOrEmpty(snapshot[i].Value.Name) ? "Dispositivo anónimo" : snapshot[i].Value.Name;
-                Console.WriteLine($"{i + 1}. {name}");
-            }
-
-            Console.Write("\nSelecciona el número del dispositivo: ");
-            if (!int.TryParse(Console.ReadLine(), out int index) || index < 1 || index > snapshot.Length)
-            {
-                return;
-            }
-
-            var selectDevice = snapshot[index - 1].Value;
-            string deviceId = selectDevice.Id;
 
             if (!discoveredDevices.TryGetValue(deviceId, out var selectedDevice))
             {
-                Console.WriteLine("El dispositivo ya no está disponible.");
+                sjm.SendMessage(new { event_type = "CONNECTION_FAILED", message = "El dispositivo ya no está disponible en la lista." });
                 return;
             }
+
+            sjm.SendMessage(new { event_type = "CONNECTION_ATTEMPT", message = $"Intentando conectar a: {selectedDevice.Name}..." });
 
             try
             {
                 // configurar parámetros de conexión estándar
                 WiFiDirectConnectionParameters parameters = new WiFiDirectConnectionParameters();
-                parameters.GroupOwnerIntent = 14; // propietario del grupo
+                parameters.GroupOwnerIntent = 14; // prioridad para ser propietario del grupo
                 parameters.PreferenceOrderedConfigurationMethods.Clear();
                 parameters.PreferenceOrderedConfigurationMethods.Add(WiFiDirectConfigurationMethod.PushButton);
+
+                DeviceInformation deviceInfo = await DeviceInformation.CreateFromIdAsync(selectedDevice.Id);
+                
+                // proceso de emparejamiento por software customizado
+                if (deviceInfo.Pairing != null && !deviceInfo.Pairing.IsPaired)
+                {
+                    sjm.SendMessage(new { event_type = "PAIRING_ATTEMPT", message = "Verificando enlace de seguridad..." });
+
+                    // Activamos un emparejamiento para windows
+                    deviceInfo.Pairing.Custom.PairingRequested += (sender, args) =>
+                    {
+                        // Aceptamos automáticamente cualquier confirmación para agilizar la conexión entre PCs
+                        args.Accept();
+                    };
+
+                    var pairingTask = deviceInfo.Pairing.Custom.PairAsync(
+                        DevicePairingKinds.ConfirmOnly,
+                        DevicePairingProtectionLevel.None
+                    ).AsTask();
+
+                    var timeoutTask = Task.Delay(15000);
+                    var completedTask = await Task.WhenAny(pairingTask, timeoutTask);
+
+                    if (completedTask == timeoutTask)
+                    {
+                        sjm.SendMessage(new { event_type = "PAIRING_SKIPPED", message = "Tiempo de espera agotado para el emparejamiento. Intentando conexión directa..." });
+                    }
+                    else
+                    {
+                        DevicePairingResult pairingResult = await pairingTask;
+                        sjm.SendMessage(new { event_type = "PAIRING_RESULT", message = $"Resultado del emparejamiento: {pairingResult.Status}" });
+                    }
+                }
 
                 WiFiDirectDevice wfdDevice = await WiFiDirectDevice.FromIdAsync(selectedDevice.Id, parameters);
 
@@ -226,43 +232,36 @@ namespace WifiDirectService.Services
                 var endpointPairs = wfdDevice.GetConnectionEndpointPairs();
                 if (endpointPairs.Count > 0)
                 {
-                    string localHost = endpointPairs[0].LocalHostName.RawName;
-
-                    Console.WriteLine("\n====== CONEXIÓN ESTABLECIDA CON ÉXITO ======");
-                    Console.WriteLine($"IP Servidor: {endpointPairs[0].LocalHostName.RawName}");
-                    Console.WriteLine($"IP Cliente: {endpointPairs[0].RemoteHostName.RawName}");
-                    Console.WriteLine("============================================\n");
-
-                    _ = Task.Run(async () => {
-                        try
-                        {
-                            await socket.StartServerSocket(endpointPairs[0].LocalHostName.RawName);
-                        }
-                        catch (Exception socketEx)
-                        {
-                            Console.WriteLine($"Error en el servidor: {socketEx.Message}");
-                        }
+                    string localhost = endpointPairs[0].LocalHostName.RawName;
+                    sjm.SendMessage(new
+                    {
+                        event_type = "CONNECTION_SUCCESS",
+                        message = "Dipspositivo conectado",
+                        status = "servidor",
+                        ip_servidor = localhost
                     });
                 }
                 else
                 {
-                    Console.WriteLine("No se pudieron negociar los Endpoints de red.");
+                    sjm.SendMessage(new { event_type = "CONNECTION_FAILED", message = "No se pudieron negociar los endpoints de red" });
                 }
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"Ocurrió un error al conectar dispositivo: {ex.Message}");
+                sjm.SendMessage(new { event_type = "CONNECTION_FAILED", message = ex.Message });
             }
         }
 
         private void RegisterConnectedDevice(WiFiDirectDevice device)
         {
-            lock (_connectedDevices) {
+            lock (_connectedDevices)
+            {
                 _connectedDevices.Add(device);
             }
         }
 
-        private void StopWatcher() {
+        private void StopWatcher()
+        {
             if (watcher != null)
             {
                 watcher.Stop();
@@ -311,6 +310,8 @@ namespace WifiDirectService.Services
                 publisher = null;
                 Console.WriteLine("Plublisher stopped");
             }
+
+            Dispose();
         }
 
         public void Dispose()

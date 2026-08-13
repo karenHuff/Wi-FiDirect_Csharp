@@ -9,6 +9,7 @@
 		<DebugType>full</DebugType> 
 		<DebugSymbols>true</DebugSymbols>
 		<UseWindowsSDK>true</UseWindowsSDK>
+		<!--PublishTrimmed>true</PublishTrimmed> -->
 		<AssemblyName>Wi-Fi Direct Service</AssemblyName>
 	</PropertyGroup>
 
