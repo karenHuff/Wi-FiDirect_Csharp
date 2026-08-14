@@ -219,6 +219,37 @@ namespace WifiDirectService.Services
                 parameters.PreferenceOrderedConfigurationMethods.Clear();
                 parameters.PreferenceOrderedConfigurationMethods.Add(WiFiDirectConfigurationMethod.PushButton);
 
+                DeviceInformation deviceInfo = await DeviceInformation.CreateFromIdAsync(selectedDevice.Id);
+
+                // Proceso de Emparejamiento por Software Customizado
+                if (deviceInfo.Pairing != null && !deviceInfo.Pairing.IsPaired)
+                {
+                    Console.WriteLine("Emparejando de forma automática por software...");
+
+                    deviceInfo.Pairing.Custom.PairingRequested += (sender, args) =>
+                    {
+                        args.Accept();
+                    };
+
+                    var pairingTask = deviceInfo.Pairing.Custom.PairAsync(
+                        DevicePairingKinds.ConfirmOnly,
+                        DevicePairingProtectionLevel.None
+                    ).AsTask();
+
+                    var timeoutTask = Task.Delay(15000);
+                    var completedTask = await Task.WhenAny(pairingTask, timeoutTask);
+
+                    if (completedTask == timeoutTask)
+                    {
+                        Console.WriteLine("Tiempo de espera agotado para el emparejamiento. Intentando conexión directa...");
+                    }
+                    else
+                    {
+                        DevicePairingResult pairingResult = await pairingTask;
+                        Console.WriteLine($"Resultado del emparejamiento: {pairingResult.Status}");
+                    }
+                }
+
                 WiFiDirectDevice wfdDevice = await WiFiDirectDevice.FromIdAsync(selectedDevice.Id, parameters);
 
                 RegisterConnectedDevice(wfdDevice);
