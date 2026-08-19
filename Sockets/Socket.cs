@@ -12,6 +12,7 @@ namespace WifiDirectService.Sockets
     public class Socket : IDisposable
     {
         private TcpListener? listener;
+        private readonly object listenerLock = new object();
         private const int PORT = 8881;
         private const string DIR = @"C:/archivosRecibidos/";
         private bool isDisposed;
@@ -19,15 +20,28 @@ namespace WifiDirectService.Sockets
         // Iniciar servidor
         public async Task StartServerSocket(string ipAddress, CancellationToken cancellationToken = default)
         {
+            TcpListener? activeListener = null;
+
             try
             {
-                listener = new TcpListener(IPAddress.Parse(ipAddress), PORT);
+                lock (listenerLock)
+                {
+                    if (listener != null)
+                    {
+                        Console.WriteLine("Ya hay un servidor activo. No se iniciará otro en el mismo puerto.");
+                        return;
+                    }
+
+                    activeListener = new TcpListener(IPAddress.Parse(ipAddress), PORT);
+                    listener = activeListener;
+                }
+
                 Console.WriteLine($"Servidor escuchando en el puerto: {PORT}");
-                listener.Start();
+                activeListener.Start();
 
                 while (true)
                 {
-                    TcpClient client = await listener.AcceptTcpClientAsync();
+                    TcpClient client = await activeListener.AcceptTcpClientAsync();
                     Console.WriteLine("Cliente conectado!");
 
                     _ = Task.Run(async () =>
@@ -90,9 +104,20 @@ namespace WifiDirectService.Sockets
                     });
                 }
             }
+            catch (SocketException) when (activeListener != null && WasStopped(activeListener))
+            {
+                // El cierre solicitado desde StopServer es una salida normal del servidor.
+            }
             catch (Exception ex)
             {
                 Console.WriteLine($"Ocurrió un error: {ex.Message}");
+            }
+            finally
+            {
+                if (activeListener != null)
+                {
+                    ClearListener(activeListener);
+                }
             }
         }
 
@@ -154,15 +179,40 @@ namespace WifiDirectService.Sockets
 
         public void StopServer()
         {
-            if (listener != null)
+            TcpListener? activeListener;
+
+            lock (listenerLock)
+            {
+                activeListener = listener;
+                listener = null;
+            }
+
+            if (activeListener != null)
             {
                 try
                 {
-                    listener.Stop();
+                    activeListener.Stop();
                 }
                 catch {}
+            }
+        }
 
-                listener = null;
+        private bool WasStopped(TcpListener activeListener)
+        {
+            lock (listenerLock)
+            {
+                return !ReferenceEquals(listener, activeListener);
+            }
+        }
+
+        private void ClearListener(TcpListener activeListener)
+        {
+            lock (listenerLock)
+            {
+                if (ReferenceEquals(listener, activeListener))
+                {
+                    listener = null;
+                }
             }
         }
 
