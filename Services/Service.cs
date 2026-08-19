@@ -302,6 +302,8 @@ namespace WifiDirectService.Services
 
         public void Stop()
         {
+            socket.StopServer();
+
             lock (_connectedDevices)
             {
                 foreach (var wfdDevice in _connectedDevices)
